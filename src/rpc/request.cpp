@@ -119,10 +119,34 @@ AuthCookieResult GenerateAuthCookie(const std::optional<fs::perms>& cookie_perms
     if (filepath_tmp.empty()) {
         return AuthCookieResult::Disabled; // -norpccookiefile
     }
+    std::error_code status_err;
+    const fs::file_status tmp_status = fs::symlink_status(filepath_tmp, status_err);
+    if (fs::exists(tmp_status)) {
+        if (fs::is_directory(tmp_status)) {
+            LogWarning("Unable to open cookie authentication file %s for writing", fs::PathToString(filepath_tmp));
+            return AuthCookieResult::Error;
+        }
+        std::error_code remove_err;
+        fs::remove(filepath_tmp, remove_err);
+        if (remove_err) {
+            LogWarning("Unable to remove existing temporary cookie authentication file %s: %s", fs::PathToString(filepath_tmp), remove_err.message());
+            return AuthCookieResult::Error;
+        }
+    }
     file.open(filepath_tmp.std_path());
     if (!file.is_open()) {
         LogWarning("Unable to open cookie authentication file %s for writing", fs::PathToString(filepath_tmp));
         return AuthCookieResult::Error;
+    }
+    if (cookie_perms) {
+        std::error_code code;
+        fs::permissions(filepath_tmp, cookie_perms.value(), fs::perm_options::replace, code);
+        if (code) {
+            file.close();
+            fs::remove(filepath_tmp, code);
+            LogWarning("Unable to set permissions on cookie authentication file %s", fs::PathToString(filepath_tmp));
+            return AuthCookieResult::Error;
+        }
     }
     file << COOKIEAUTH_USER << ":" << rand_pwd_hex;
     file.close();
@@ -131,14 +155,6 @@ AuthCookieResult GenerateAuthCookie(const std::optional<fs::perms>& cookie_perms
     if (!RenameOver(filepath_tmp, filepath)) {
         LogWarning("Unable to rename cookie authentication file %s to %s", fs::PathToString(filepath_tmp), fs::PathToString(filepath));
         return AuthCookieResult::Error;
-    }
-    if (cookie_perms) {
-        std::error_code code;
-        fs::permissions(filepath, cookie_perms.value(), fs::perm_options::replace, code);
-        if (code) {
-            LogWarning("Unable to set permissions on cookie authentication file %s", fs::PathToString(filepath));
-            return AuthCookieResult::Error;
-        }
     }
 
     g_generated_cookie = true;

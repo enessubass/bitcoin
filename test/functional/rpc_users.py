@@ -114,6 +114,15 @@ class HTTPBasicsTest(BitcoinTestFramework):
         self.log.info('Check default cookie permission')
         test_perm(None)
 
+        self.log.info('Check pre-existing permissive .cookie.tmp does not leak permissions')
+        self.stop_node(1)
+        cookie_tmp_path = self.nodes[1].chain_path / '.cookie.tmp'
+        cookie_tmp_path.write_text('stale')
+        os.chmod(cookie_tmp_path, 0o666)
+        self.start_node(1)
+        assert_equal(os.stat(cookie_file_path).st_mode & PERM_BITS_UMASK, p['owner'])
+        assert not cookie_tmp_path.exists()
+
         self.log.info('Check custom cookie permissions')
         for perm in ["owner", "group", "all"]:
             test_perm(perm)
