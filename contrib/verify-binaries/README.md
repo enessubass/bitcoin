@@ -23,6 +23,11 @@ You can obtain these keys by
   - you can run the packaged `verify.py --import-keys ...` script to
     have it automatically retrieve unrecognized keys.
 
+Importing a key does not make it trusted by GPG. The signature threshold
+counts distinct signers that are trusted by local GPG settings or explicitly
+listed with `--trusted-keys` (after independently verifying their full
+fingerprints). Revoked keys do not count toward the threshold.
+
 #### Usage
 
 This script attempts to download the checksum file (`SHA256SUMS`) and corresponding
@@ -34,7 +39,7 @@ hashes of the release files are as expected. Signatures from keys that GPG repor
 expired or revoked (`EXPKEYSIG`, `REVKEYSIG`, or `KEYREVOKED`) are reported as `EXPIRED SIGNATURE` or
 `REVOKED SIGNATURE` warnings and do not count toward that plurality by default, regardless of when
 the signature was made. For older releases, `--allow-expired` or `BINVERIFY_ALLOW_EXPIRED=1`
-also counts expired signatures. Revoked ones never count. Successful JSON output lists
+also counts expired signatures from trusted keys. Revoked ones never count. Successful JSON output lists
 expired signatures separately in `expired_sigs`.
 
 If we encounter pubkeys in the signature file that we do not recognize, the script
@@ -48,7 +53,7 @@ See the `Config` object for various options.
 
 #### Examples
 
-Validate releases with default settings:
+Validate releases when enough signer keys are already trusted by local GPG settings:
 ```sh
 ./contrib/verify-binaries/verify.py pub 22.0
 ./contrib/verify-binaries/verify.py pub 22.0-rc3

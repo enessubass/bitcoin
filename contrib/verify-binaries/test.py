@@ -1,18 +1,130 @@
 #!/usr/bin/env python3
 
+import argparse
 import json
 import os
 import sys
 import subprocess
 from pathlib import Path
+import unittest
 from unittest import mock
 
-import verify
+try:
+    import verify
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import verify
+
+
+class SignatureTrustTests(unittest.TestCase):
+    def check_signatures(
+        self,
+        trusted_keys,
+        gpg_trust,
+        fingerprints=None,
+        subkeys="EF1",
+        signature_status="GOODSIG",
+        allow_expired=False,
+    ):
+        if fingerprints is None:
+            fingerprints = [digit * 40 for digit in "ABC"]
+        statuses = (
+            [signature_status] * len(fingerprints)
+            if isinstance(signature_status, str)
+            else signature_status
+        )
+        lines = []
+        for fingerprint, subkey_digit, status_code in zip(fingerprints, subkeys, statuses):
+            subkey_fingerprint = subkey_digit * 40
+            lines.extend([
+                "[GNUPG:] NEWSIG",
+                f"[GNUPG:] {status_code} {subkey_fingerprint[-16:]} signer",
+                f"[GNUPG:] VALIDSIG {subkey_fingerprint} 2026-01-01 1 0 4 0 1 8 00 {fingerprint}",
+                f"[GNUPG:] TRUST_{gpg_trust} 0 pgp",
+            ])
+        good, unknown, bad = verify.parse_gpg_result(lines)
+        args = argparse.Namespace(
+            min_good_sigs=3,
+            allow_expired=allow_expired,
+            trusted_keys=trusted_keys,
+            keyserver="hkps://keys.openpgp.org",
+        )
+        with mock.patch.object(verify.log, "disabled", new=True), mock.patch.object(
+            verify, "check_multisig", return_value=(2, "\n".join(lines), good, unknown, bad)
+        ):
+            return verify.verify_shasums_signature("unused.asc", "unused", args)
+
+    def test_untrusted_signatures_do_not_satisfy_threshold(self):
+        status, trusted, untrusted, _, _, _ = self.check_signatures("D" * 40, "UNDEFINED")
+        self.assertEqual(status, verify.ReturnCode.NOT_ENOUGH_GOOD_SIGS)
+        self.assertEqual(trusted, [])
+        self.assertEqual(untrusted, [])
+
+    def test_none_trusted_keys_handled(self):
+        status, trusted, _, _, _, _ = self.check_signatures(None, "UNDEFINED")
+        self.assertEqual(status, verify.ReturnCode.NOT_ENOUGH_GOOD_SIGS)
+        self.assertEqual(trusted, [])
+
+    def test_explicit_primary_fingerprints_satisfy_threshold(self):
+        fingerprints = ",".join(digit * 40 for digit in "abc")
+        status, trusted, untrusted, _, _, _ = self.check_signatures(fingerprints, "UNDEFINED")
+        self.assertEqual(status, verify.ReturnCode.SUCCESS)
+        self.assertEqual(len(trusted), 3)
+        self.assertEqual(untrusted, [])
+
+    def test_explicit_subkey_fingerprints_deduplicate_by_primary(self):
+        subkey_fps = ",".join(digit * 40 for digit in "EF1")
+        status, trusted, _, _, _, _ = self.check_signatures(subkey_fps, "UNDEFINED")
+        self.assertEqual(status, verify.ReturnCode.SUCCESS)
+        self.assertEqual(len(trusted), 3)
+
+        same_primary = ["A" * 40] * 3
+        status_dup, _, _, _, _, _ = self.check_signatures(subkey_fps, "UNDEFINED", fingerprints=same_primary)
+        self.assertEqual(status_dup, verify.ReturnCode.NOT_ENOUGH_GOOD_SIGS)
+
+    def test_gpg_trust_satisfies_threshold(self):
+        status, trusted, untrusted, _, _, _ = self.check_signatures("", "FULLY")
+        self.assertEqual(status, verify.ReturnCode.SUCCESS)
+        self.assertEqual(len(trusted), 3)
+        self.assertEqual(untrusted, [])
+
+    def test_revoked_signatures_do_not_satisfy_threshold(self):
+        fingerprints = ",".join(digit * 40 for digit in "ABC")
+        status, _, _, _, _, _ = self.check_signatures(fingerprints, "FULLY", signature_status="REVKEYSIG")
+        self.assertEqual(status, verify.ReturnCode.NOT_ENOUGH_GOOD_SIGS)
+
+    def test_expired_signatures_require_trust_and_deduplicate(self):
+        untrusted_status, _, _, _, _, expired = self.check_signatures(
+            "D" * 40, "UNDEFINED", signature_status="EXPKEYSIG", allow_expired=True
+        )
+        self.assertEqual(untrusted_status, verify.ReturnCode.NOT_ENOUGH_GOOD_SIGS)
+        self.assertEqual(len(expired), 3)
+
+        fingerprints = ",".join(digit * 40 for digit in "ABC")
+        trusted_status, trusted, _, _, _, expired = self.check_signatures(
+            fingerprints, "UNDEFINED", signature_status="EXPKEYSIG", allow_expired=True
+        )
+        self.assertEqual(trusted_status, verify.ReturnCode.SUCCESS)
+        self.assertEqual(trusted, [])
+        self.assertEqual(len(expired), 3)
+
+        same_primary = ["A" * 40] * 3
+        dup_status, _, _, _, _, _ = self.check_signatures(
+            "A" * 40,
+            "UNDEFINED",
+            fingerprints=same_primary,
+            signature_status=["GOODSIG", "EXPKEYSIG", "EXPKEYSIG"],
+            allow_expired=True,
+        )
+        self.assertEqual(dup_status, verify.ReturnCode.NOT_ENOUGH_GOOD_SIGS)
 
 
 def main():
     """Tests ordered roughly from faster to slower."""
     test_inactive_signature_quorum()
+    suite = unittest.defaultTestLoader.loadTestsFromTestCase(SignatureTrustTests)
+    if not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful():
+        sys.exit(1)
     expect_code(run_verify("", "pub", '0.32'), 4, "Nonexistent version should fail")
     expect_code(run_verify("", "pub", '0.32.awefa.12f9h'), 11, "Malformed version should fail")
     expect_code(run_verify('--min-good-sigs 20', "pub", "22.0"), 9, "--min-good-sigs 20 should fail")
