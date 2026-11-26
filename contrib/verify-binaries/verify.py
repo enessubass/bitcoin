@@ -445,6 +445,10 @@ def parse_sums_file(sums_file_path: str, filename_filter: list[str]) -> list[lis
 
 
 def verify_binary_hashes(hashes_to_verify: list[list[str]]) -> tuple[ReturnCode, dict[str, str]]:
+    if not hashes_to_verify:
+        log.error("No binaries available to verify")
+        return (ReturnCode.NO_BINARIES_MATCH, {})
+
     offending_files = []
     files_to_hashes = {}
 
@@ -553,6 +557,8 @@ def verify_published_handler(args: argparse.Namespace) -> ReturnCode:
     # verify hashes
     hashes_status, files_to_hashes = verify_binary_hashes(hashes_to_verify)
     if hashes_status != ReturnCode.SUCCESS:
+        if args.cleanup:
+            cleanup()
         return hashes_status
 
 

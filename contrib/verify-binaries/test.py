@@ -3,11 +3,13 @@
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or https://opensource.org/license/mit.
 
+import hashlib
 import json
 import os
 import sys
 import subprocess
 from pathlib import Path
+import tempfile
 from unittest import mock
 
 import verify
@@ -16,6 +18,7 @@ import verify
 def main():
     """Tests ordered roughly from faster to slower."""
     test_inactive_signature_quorum()
+    test_empty_binary_hashes()
     expect_code(run_verify("", "pub", '0.32'), 4, "Nonexistent version should fail")
     expect_code(run_verify("", "pub", '0.32.awefa.12f9h'), 11, "Malformed version should fail")
     expect_code(run_verify('--min-good-sigs 20', "pub", "22.0"), 9, "--min-good-sigs 20 should fail")
@@ -158,6 +161,48 @@ def test_inactive_signature_quorum():
     assert [sig.key for sig in expired_sigs] == [other_subkey[-16:]]
 
     print("✓ 'Inactive signature quorum' passed")
+
+
+@mock.patch.object(verify.log, 'disabled', new=True)
+def test_empty_binary_hashes():
+    assert verify.verify_binary_hashes([]) == (verify.ReturnCode.NO_BINARIES_MATCH, {})
+
+    payload = b'offline binary fixture'
+    digest = hashlib.sha256(payload).hexdigest()
+    ok_sig = (verify.ReturnCode.SUCCESS, [], [], [], [], [])
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        base = Path(temp_dir)
+        old_cwd = Path.cwd()
+        try:
+            def fetch(_hosts, _remote, filename, _require_all):
+                Path(filename).write_text(manifest if filename == verify.SUMS_FILENAME else 'sig')
+                return verify.ReturnCode.SUCCESS
+
+            parser = verify.build_parser()
+            args = parser.parse_args(['pub', '--cleanup', '99.0-x86_64-linux'])
+            with (
+                mock.patch.object(verify.tempfile, 'gettempdir', return_value=temp_dir),
+                mock.patch.object(verify, 'get_files_from_hosts_and_compare', side_effect=fetch),
+                mock.patch.object(verify, 'verify_shasums_signature', return_value=ok_sig),
+            ):
+                for fragment in ('-unsigned', '-debug', '-codesignatures'):
+                    manifest = f'{digest}  bitcoin-99.0-x86_64-linux{fragment}.tar.gz\n'
+                    assert verify.verify_published_handler(args) == verify.ReturnCode.NO_BINARIES_MATCH
+                    assert not (base / 'bitcoin_verify_binaries.99.0-x86_64-linux').exists()
+        finally:
+            os.chdir(old_cwd)
+
+        sums = base / verify.SUMS_FILENAME
+        present = base / 'present.tar.gz'
+        sums.write_text(f'{digest}  {present.name}\n{digest}  missing.tar.gz\n')
+        local_args = parser.parse_args(['--json', 'bin', str(sums)])
+        with mock.patch.object(verify, 'verify_shasums_signature', return_value=ok_sig):
+            assert verify.verify_binaries_handler(local_args) == verify.ReturnCode.NO_BINARIES_MATCH
+            present.write_bytes(payload)
+            assert verify.verify_binaries_handler(local_args) == verify.ReturnCode.SUCCESS
+
+    print("✓ 'Empty binary hashes' passed")
 
 
 def run_verify(global_args: str, command: str, command_args: str) -> subprocess.CompletedProcess:
